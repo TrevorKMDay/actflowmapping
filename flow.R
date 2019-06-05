@@ -3,14 +3,15 @@ library(tidyverse)
 library(stringr)   # 0-pad
 library(Hmisc)     # rcorr()
 library(ggplot2)   # plots
+  library(ggcorrplot)
 library(DescTools) # Fisher R-to-Z
 library(RNifti)    # Read NIFTI header
 
-library(R.matlab)  # Save .mat files for import to MATLA
+library(R.matlab)  # Save .mat files for import to MATLAB
 
 # Setup
 project.home <- "/mnt/praxic/pdnetworksr01"
-setwd(paste0(project.home, "/bin/flowanalysis"))
+setwd(paste0(project.home, "/bin/flowanalysis/actflowmapping"))
 
 mefc <- "_e00213_mefc_reoriented_toMNI.nii.gz"
 
@@ -59,11 +60,35 @@ read.values <- function(subj, scan = "rs", N = NA) {
   
 }
 
+# Check whether a subject is ready to process
 check.readiness <- function(subj, file) {
   
   file <- paste0(project.home, "/subjects/", subj, "/session1/", file)
   
   return(file.exists(file))
+  
+}
+
+# Remove all-0 columns from RS ROI table
+remove.0 <- function(table) {
+  
+  which.0s <- apply(table, 2, mean) == 0
+  n <- sum(which.0s)
+  
+  if (n > 0) {
+    
+    message("Removing ", n, " all-0 columns")
+    the.range <- range(table) / 100
+    
+    new.rows <- matrix(runif(nrow(table) * n, 
+                              min = the.range[1], max = the.range[2]),
+                        nrow = nrow(table), ncol = n)
+    
+    table[, which.0s] <- new.rows
+  
+  }
+  
+  return(table)
   
 }
 
@@ -93,9 +118,15 @@ subjects <- intersect(mrest.subjects, mcvs_.subjects)
 # Resting state data for 100023
 rest <- lapply(subjects, read.values) 
 
+# If any subjects have an all-0 column, that means that ROI was outside of the 
+# brain. Instead of tossing the subject, replace it with fake data two degrees
+# of magnitude below the rest of the data. This should be uncorrelated enough
+# to allow the subject to be included
+rest.clean <- lapply(rest, remove.0)
+
 # Rcorr requries > 4 rows; drop anyone too short, keep just R matrices
-rest.nrow <- sapply(rest, nrow)
-rest.r <- lapply(rest[rest.nrow > 4], function(x) rcorr(x)$r)
+rest.nrow <- sapply(rest.clean, nrow)
+rest.r <- lapply(rest.clean[rest.nrow > 4], function(x) rcorr(x)$r)
 
 # Create and save 4D RS array as MATLAB object
 # Third dim is 1 because there's only one correlation modality
@@ -112,6 +143,13 @@ message("Using ", n.subjects, " subjects")
 # Who is missing?
 rest.na <- apply(rest.arr, 1:4, is.na)
 rest.na.subj <- apply(rest.na, 4, sum) > 0
+
+for (i in 1:58) {
+  
+  x <- sum(rest.na[[i]])
+  message(x)
+  
+}
 
 which(rest.na.subj)
 subjects[rest.na.subj]
@@ -144,3 +182,37 @@ for (roi in seeds.n) {
 sum(is.na(task.arr)) / prod(dim(task.arr))
 
 writeMat("task.mat", x = task.arr)
+
+################################################################################
+# Some pretty plots
+
+# RS
+
+# Reduce along subjects
+rest.mean <- apply(rest.arr, 1:2, mean)
+rest.mean[rest.mean == 1] <- NA
+rest.mean.Z <- FisherZ(rest.mean)
+rest.mean.Z.melt <- melt(rest.mean.Z)
+
+ggplot(rest.mean.Z.melt, aes(x = Var1, y = Var2, fill = value)) +
+  geom_raster() +
+  scale_fill_gradient2(low = "red4", high = "navyblue", mid = "white", 
+                       midpoint = 0, na.value = "white") +
+  theme_bw() +
+  theme(axis.title = element_blank(), axis.ticks = element_blank(), 
+        axis.text = element_blank(), panel.border = element_blank()) 
+
+# Task
+
+mcvsa.mean <- apply(mcvsa, 1, mean)
+mcvsm00.mean <- apply(mcvsm00, 1, mean)
+mcvsm12.mean <- apply(mcvsm12, 1, mean)
+
+task.mean.values <- cbind(mcvsa.mean, mcvsm00.mean, mcvsm12.mean)
+task.mean.vals.melt <- melt(task.mean.values)
+
+ggplot(task.mean.vals.melt, aes(x = Var1, y = value, color = Var2)) +
+  geom_line() +
+  labs(x = "Power ROI Index", y = "t Statistic", color = "Stimulus") +
+  scale_color_discrete(labels = c("0-back (att.)", "0-back (mem.)", 
+                                  "n-back"))
